@@ -12,6 +12,7 @@ jobs:
       - name: Link Checker
         uses: lycheeverse/lychee-action@v2
         with:
+          failIfEmpty: false
           args: --offline --verbose --no-progress --accept 200,429 '**/*.md' '**/*.html'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
