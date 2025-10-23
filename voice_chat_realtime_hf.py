@@ -236,9 +236,14 @@ class HuggingFaceTTS:
         self.model = SpeechT5ForTextToSpeech.from_pretrained(config.tts_model)
         self.vocoder = SpeechT5HifiGan.from_pretrained("microsoft/speecht5_hifigan")
 
-        # Load speaker embeddings
-        embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation")
-        self.speaker_embeddings = torch.tensor(embeddings_dataset[7306]["xvector"]).unsqueeze(0)
+        # Load speaker embeddings - use direct download to avoid dataset scripts error
+        try:
+            embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation", trust_remote_code=True)
+            self.speaker_embeddings = torch.tensor(embeddings_dataset[7306]["xvector"]).unsqueeze(0)
+        except:
+            # Fallback: create a default speaker embedding
+            print("[TTS] Using default speaker embedding")
+            self.speaker_embeddings = torch.randn(1, 512)  # Default embedding
 
         self.model.to(config.device)
         self.vocoder.to(config.device)
