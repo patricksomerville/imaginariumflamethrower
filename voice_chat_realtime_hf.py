@@ -66,7 +66,7 @@ class RTCConfig:
 
     # Model settings
     stt_model: str = "openai/whisper-tiny.en"  # Fast STT model
-    llm_model: str = "HuggingFaceH4/zephyr-7b-beta"  # Conversational LLM
+    llm_model: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Fast CPU LLM (1.1B params)
     tts_model: str = "microsoft/speecht5_tts"  # Fast TTS
 
     # Performance
