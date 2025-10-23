@@ -378,6 +378,6 @@ if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,
-        share=False,  # Set to True for public URL (useful for testing on mobile)
+        share=True,  # Creates a public URL automatically!
         show_error=True
     )
