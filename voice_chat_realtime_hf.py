@@ -118,8 +118,8 @@ class HuggingFaceSTT:
             # Convert bytes to numpy array
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-            # Run transcription
-            result = self.pipe(audio_array, generate_kwargs={"language": "english"})
+            # Run transcription (no language param for English-only model)
+            result = self.pipe(audio_array)
 
             text = result["text"].strip()
             print(f"[STT] Transcribed: {text}")
@@ -327,7 +327,7 @@ class RealtimeVoiceChat:
         """
         if self.is_processing:
             print("[RTC] Busy processing, skipping...")
-            return None
+            return
 
         try:
             self.is_processing = True
@@ -341,7 +341,7 @@ class RealtimeVoiceChat:
 
             if len(audio_bytes) < 4000:  # Too short
                 print("[RTC] Audio too short, skipping")
-                return None
+                return
 
             # Step 1: Speech-to-Text (synchronous in this context)
             print("[RTC] [1/3] Transcribing speech...")
@@ -354,7 +354,7 @@ class RealtimeVoiceChat:
 
             if not user_text.strip():
                 print("[RTC] No speech detected")
-                return None
+                return
 
             # Step 2: AI Response
             print("[RTC] [2/3] Generating AI response...")
@@ -370,12 +370,12 @@ class RealtimeVoiceChat:
             response_audio = loop.run_until_complete(self.tts.synthesize(ai_response))
             loop.close()
 
-            # Step 4: Return audio to FastRTC
+            # Step 4: Yield audio to FastRTC (must use yield for generator)
             if response_audio:
                 # Convert bytes to numpy array for FastRTC
                 response_array = np.frombuffer(response_audio[44:], dtype=np.int16).astype(np.float32) / 32767.0  # Skip WAV header
-                print("[RTC] ✓ Returning audio response\n")
-                return (16000, response_array)  # Return (sample_rate, numpy_array)
+                print("[RTC] ✓ Yielding audio response\n")
+                yield (16000, response_array)  # Yield (sample_rate, numpy_array)
 
         except Exception as e:
             print(f"[RTC] ERROR: {e}")
@@ -384,8 +384,6 @@ class RealtimeVoiceChat:
 
         finally:
             self.is_processing = False
-
-        return None
 
 
 
