@@ -1,0 +1,96 @@
+# Real-time Voice Chat Component - Core Dependencies
+# ===================================================
+
+# FastRTC - Real-time communication library
+fastrtc>=0.1.0
+
+# Gradio - Web UI framework
+gradio>=4.0.0
+
+# ===================================================
+# Optional Dependencies - Choose based on your needs
+# ===================================================
+
+# Speech-to-Text Options (choose one or more):
+# --------------------------------------------
+# Option 1: OpenAI Whisper API (cloud-based, most accurate)
+openai>=1.0.0
+
+# Option 2: Local Whisper (run locally, no API costs)
+# openai-whisper>=20230314
+
+# Option 3: AssemblyAI (real-time transcription)
+# assemblyai>=0.17.0
+
+# Option 4: Google Cloud Speech-to-Text
+# google-cloud-speech>=2.0.0
+
+
+# Text-to-Speech Options (choose one or more):
+# --------------------------------------------
+# Option 1: OpenAI TTS (included in openai package above)
+
+# Option 2: ElevenLabs (high-quality voices)
+# elevenlabs>=0.2.0
+
+# Option 3: Google Cloud TTS
+# google-cloud-texttospeech>=2.0.0
+
+# Option 4: Edge TTS (free, Microsoft voices)
+# edge-tts>=6.0.0
+
+# Option 5: pyttsx3 (offline, basic quality)
+# pyttsx3>=2.90
+
+
+# AI Agent / LLM Options (choose one or more):
+# --------------------------------------------
+# Option 1: OpenAI GPT (included in openai package above)
+
+# Option 2: Anthropic Claude
+# anthropic>=0.18.0
+
+# Option 3: Local LLM via Ollama (requires Ollama running)
+# ollama>=0.1.0
+
+# Option 4: Hugging Face Transformers (local models)
+# transformers>=4.30.0
+# torch>=2.0.0
+
+
+# Audio Processing Utilities:
+# ---------------------------
+# For audio format conversion and processing
+pydub>=0.25.1
+numpy>=1.24.0
+scipy>=1.10.0
+
+# For WAV file handling
+wave
+
+# ===================================================
+# Development Dependencies (optional)
+# ===================================================
+# pytest>=7.0.0
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0
+
+
+# ===================================================
+# Installation Instructions
+# ===================================================
+#
+# Minimal installation (Gradio UI only, no voice features):
+#   pip install fastrtc gradio
+#
+# Recommended installation (OpenAI for STT/TTS/LLM):
+#   pip install -r requirements.txt
+#   pip install openai pydub numpy scipy
+#
+# Full local installation (no API costs, runs offline):
+#   pip install fastrtc gradio
+#   pip install openai-whisper torch transformers
+#   pip install pyttsx3 pydub numpy scipy
+#
+# Install Ollama separately from: https://ollama.ai
