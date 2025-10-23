@@ -21,8 +21,7 @@ from dataclasses import dataclass
 
 # Check for required packages
 try:
-    from fastrtc import Stream, AudioDeviceConfig, ReplyOnPause
-    from fastrtc.types import AudioData
+    from fastrtc import Stream, ReplyOnPause
 except ImportError:
     print("ERROR: FastRTC not installed!")
     print("Install: pip install fastrtc")
@@ -313,46 +312,65 @@ class RealtimeVoiceChat:
         print("\n[RTC] ✓ All components initialized")
         print("="*60 + "\n")
 
-    async def on_user_speech(self, audio_data: AudioData) -> None:
+    def on_user_speech(self, audio_data: tuple):
         """
         Callback when user finishes speaking (ReplyOnPause triggered).
         This is where the real-time magic happens!
+
+        Args:
+            audio_data: Tuple of (sample_rate, numpy_array) from FastRTC
         """
         if self.is_processing:
             print("[RTC] Busy processing, skipping...")
-            return
+            return None
 
         try:
             self.is_processing = True
             print("\n[RTC] 🎤 User finished speaking...")
 
-            # Extract audio bytes from FastRTC AudioData
-            audio_bytes = self._extract_audio_bytes(audio_data)
+            # Extract audio from FastRTC format
+            sample_rate, audio_array = audio_data
+
+            # Convert numpy array to bytes
+            audio_bytes = (audio_array * 32767).astype(np.int16).tobytes()
 
             if len(audio_bytes) < 4000:  # Too short
                 print("[RTC] Audio too short, skipping")
-                return
+                return None
 
-            # Step 1: Speech-to-Text
+            # Step 1: Speech-to-Text (synchronous in this context)
             print("[RTC] [1/3] Transcribing speech...")
-            user_text = await self.stt.transcribe(audio_bytes)
+            # Run async function in sync context for FastRTC
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            user_text = loop.run_until_complete(self.stt.transcribe(audio_bytes))
+            loop.close()
 
             if not user_text.strip():
                 print("[RTC] No speech detected")
-                return
+                return None
 
             # Step 2: AI Response
             print("[RTC] [2/3] Generating AI response...")
-            ai_response = await self.llm.process(user_text)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            ai_response = loop.run_until_complete(self.llm.process(user_text))
+            loop.close()
 
             # Step 3: Text-to-Speech
             print("[RTC] [3/3] Converting to speech...")
-            response_audio = await self.tts.synthesize(ai_response)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            response_audio = loop.run_until_complete(self.tts.synthesize(ai_response))
+            loop.close()
 
-            # Step 4: Send back to user via FastRTC stream
-            if self.stream and response_audio:
-                await self._send_audio_to_stream(response_audio)
-                print("[RTC] ✓ Response sent to user\n")
+            # Step 4: Return audio to FastRTC
+            if response_audio:
+                # Convert bytes to numpy array for FastRTC
+                response_array = np.frombuffer(response_audio[44:], dtype=np.int16).astype(np.float32) / 32767.0  # Skip WAV header
+                print("[RTC] ✓ Returning audio response\n")
+                return (16000, response_array)  # Return (sample_rate, numpy_array)
 
         except Exception as e:
             print(f"[RTC] ERROR: {e}")
@@ -362,86 +380,19 @@ class RealtimeVoiceChat:
         finally:
             self.is_processing = False
 
-    def _extract_audio_bytes(self, audio_data: AudioData) -> bytes:
-        """Extract raw audio bytes from FastRTC AudioData"""
-        # FastRTC AudioData format handling
-        if isinstance(audio_data, bytes):
-            return audio_data
-        elif hasattr(audio_data, 'tobytes'):
-            return audio_data.tobytes()
-        elif hasattr(audio_data, 'data'):
-            return audio_data.data if isinstance(audio_data.data, bytes) else bytes(audio_data.data)
-        else:
-            return bytes(audio_data)
+        return None
 
-    async def _send_audio_to_stream(self, audio_bytes: bytes) -> None:
-        """Send audio back to user through FastRTC stream"""
-        if not self.stream:
-            print("[RTC] Warning: No stream available")
-            return
-
-        try:
-            # FastRTC stream API (check documentation for exact method)
-            if hasattr(self.stream, 'send'):
-                await self.stream.send(audio_bytes)
-            elif hasattr(self.stream, 'write'):
-                await self.stream.write(audio_bytes)
-            elif hasattr(self.stream, 'send_audio'):
-                await self.stream.send_audio(audio_bytes)
-            else:
-                print("[RTC] Warning: Don't know how to send audio to stream")
-        except Exception as e:
-            print(f"[RTC] Error sending audio: {e}")
-
-    async def start_stream(self) -> None:
-        """Start the FastRTC real-time audio stream"""
-        print("[RTC] Starting FastRTC stream...")
-
-        # Configure audio
-        audio_config = AudioDeviceConfig(
-            sample_rate=self.config.sample_rate,
-            channels=self.config.channels
-        )
-
-        # Create ReplyOnPause handler for voice activity detection
-        reply_handler = ReplyOnPause(
-            on_audio=self.on_user_speech,
-            silence_duration=self.config.silence_duration,
-            min_speech_duration=self.config.min_speech_duration
-        )
-
-        # Create and start stream
-        self.stream = Stream(
-            audio_device_config=audio_config,
-            reply_on_pause=reply_handler
-        )
-
-        self.active = True
-        print("[RTC] ✓ Stream started - listening for speech...")
-
-        # Keep stream alive
-        try:
-            await self.stream.start()
-        except KeyboardInterrupt:
-            print("\n[RTC] Stopping stream...")
-            self.active = False
-
-    async def stop_stream(self) -> None:
-        """Stop the FastRTC stream"""
-        self.active = False
-        if self.stream:
-            await self.stream.stop()
-            self.stream = None
-        print("[RTC] Stream stopped")
 
 
 # ============================================================================
-# Gradio UI
+# Gradio UI with FastRTC
 # ============================================================================
 
 def create_gradio_interface() -> gr.Blocks:
     """Create Gradio web interface for the real-time voice chat"""
 
+    # Initialize chat handler
+    print("Initializing Real-time Voice Chat Handler...")
     chat_handler = RealtimeVoiceChat()
 
     with gr.Blocks(title="Real-time Voice Chat", theme=gr.themes.Soft()) as demo:
@@ -455,45 +406,26 @@ def create_gradio_interface() -> gr.Blocks:
         - **Hugging Face SpeechT5** for text-to-speech
 
         ### How to Use:
-        1. Click "Start Stream" to begin real-time listening
+        1. Click "Connect" below to start the audio stream
         2. Speak naturally - the system detects when you finish speaking
         3. AI responds automatically with voice
-        4. Click "Stop Stream" when done
+        4. The conversation continues until you close the page
 
-        ### Status:
+        ### ⚠️ First Run:
+        Models will download automatically (~15GB). This may take 10-30 minutes.
         """)
 
-        status_box = gr.Textbox(label="Stream Status", value="Ready to start", interactive=False)
-
-        with gr.Row():
-            start_btn = gr.Button("🎤 Start Stream", variant="primary", size="lg")
-            stop_btn = gr.Button("⏹️ Stop Stream", variant="stop", size="lg")
-
-        gr.Markdown("### Conversation Log")
-        log_box = gr.Textbox(label="Recent Activity", lines=10, interactive=False)
-
-        # Button handlers
-        async def start_stream():
-            try:
-                await chat_handler.start_stream()
-                return "🟢 Stream ACTIVE - Listening for speech...", "Stream running..."
-            except Exception as e:
-                return f"❌ Error: {e}", "Error starting stream"
-
-        async def stop_stream():
-            await chat_handler.stop_stream()
-            return "🔴 Stream STOPPED", "Stream stopped"
-
-        start_btn.click(
-            fn=start_stream,
-            inputs=[],
-            outputs=[status_box, log_box]
+        # Create FastRTC Stream with ReplyOnPause
+        handler = ReplyOnPause(
+            fn=chat_handler.on_user_speech,
+            input_sample_rate=16000,
+            output_sample_rate=16000
         )
 
-        stop_btn.click(
-            fn=stop_stream,
-            inputs=[],
-            outputs=[status_box, log_box]
+        webrtc = Stream(
+            handler=handler,
+            mode="send-receive",
+            modality="audio"
         )
 
     return demo
