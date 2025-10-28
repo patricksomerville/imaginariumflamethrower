@@ -12,12 +12,15 @@ This is NOT record-and-respond. It's continuous streaming audio.
 """
 
 import asyncio
+import io
+import threading
+import wave
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple
+
 import numpy as np
 import torch
-import io
-import wave
-from typing import Optional, List
-from dataclasses import dataclass
 
 # Check for required packages
 try:
@@ -311,71 +314,91 @@ class RealtimeVoiceChat:
 
         # State
         self.stream: Optional[Stream] = None
-        self.is_processing = False
         self.active = False
+        self._processing_lock = threading.Lock()
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(target=self._loop.run_forever, daemon=True)
+        self._loop_thread.start()
+        self._async_timeout = 60.0
 
         print("\n[RTC] ✓ All components initialized")
         print("="*60 + "\n")
 
     def on_user_speech(self, audio_data: tuple):
-        """
-        Callback when user finishes speaking (ReplyOnPause triggered).
-        This is where the real-time magic happens!
-
-        Args:
-            audio_data: Tuple of (sample_rate, numpy_array) from FastRTC
-        """
-        if self.is_processing:
+        """Callback triggered when the user finishes speaking."""
+        if not self._processing_lock.acquire(blocking=False):
             print("[RTC] Busy processing, skipping...")
             return
 
         try:
-            self.is_processing = True
             print("\n[RTC] 🎤 User finished speaking...")
 
-            # Extract audio from FastRTC format
+            if not isinstance(audio_data, tuple) or len(audio_data) != 2:
+                print("[RTC] Unexpected audio payload format")
+                return
+
             sample_rate, audio_array = audio_data
 
-            # Convert numpy array to bytes
-            audio_bytes = (audio_array * 32767).astype(np.int16).tobytes()
+            try:
+                audio_bytes = self._array_to_pcm_bytes(audio_array)
+            except ValueError as exc:
+                print(f"[RTC] Invalid audio payload: {exc}")
+                return
 
             if len(audio_bytes) < 4000:  # Too short
                 print("[RTC] Audio too short, skipping")
                 return
 
-            # Step 1: Speech-to-Text (synchronous in this context)
             print("[RTC] [1/3] Transcribing speech...")
-            # Run async function in sync context for FastRTC
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            user_text = loop.run_until_complete(self.stt.transcribe(audio_bytes))
-            loop.close()
+            try:
+                user_text = self._run_async(self.stt.transcribe(audio_bytes))
+            except FuturesTimeoutError:
+                print("[RTC] STT timed out")
+                return
+            except Exception as exc:
+                print(f"[RTC] STT failed: {exc}")
+                return
 
-            if not user_text.strip():
+            if not user_text or not user_text.strip():
                 print("[RTC] No speech detected")
                 return
 
-            # Step 2: AI Response
             print("[RTC] [2/3] Generating AI response...")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            ai_response = loop.run_until_complete(self.llm.process(user_text))
-            loop.close()
+            try:
+                ai_response = self._run_async(self.llm.process(user_text))
+            except FuturesTimeoutError:
+                print("[RTC] LLM timed out")
+                return
+            except Exception as exc:
+                print(f"[RTC] LLM failed: {exc}")
+                return
 
-            # Step 3: Text-to-Speech
             print("[RTC] [3/3] Converting to speech...")
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            response_audio = loop.run_until_complete(self.tts.synthesize(ai_response))
-            loop.close()
+            try:
+                response_audio = self._run_async(self.tts.synthesize(ai_response))
+            except FuturesTimeoutError:
+                print("[RTC] TTS timed out")
+                return
+            except Exception as exc:
+                print(f"[RTC] TTS failed: {exc}")
+                return
 
-            # Step 4: Yield audio to FastRTC (must use yield for generator)
-            if response_audio:
-                # Convert bytes to numpy array for FastRTC
-                response_array = np.frombuffer(response_audio[44:], dtype=np.int16).astype(np.float32) / 32767.0  # Skip WAV header
-                print("[RTC] ✓ Yielding audio response\n")
-                yield (16000, response_array)  # Yield (sample_rate, numpy_array)
+            if not response_audio:
+                print("[RTC] No audio generated from TTS")
+                return
+
+            try:
+                response_rate, response_array = self._wav_bytes_to_float_array(response_audio)
+            except ValueError as exc:
+                print(f"[RTC] Could not parse TTS audio: {exc}")
+                return
+
+            if response_array.size == 0:
+                print("[RTC] Generated audio was empty")
+                return
+
+            print("[RTC] ✓ Yielding audio response\n")
+            yield (response_rate, response_array)
 
         except Exception as e:
             print(f"[RTC] ERROR: {e}")
@@ -383,8 +406,59 @@ class RealtimeVoiceChat:
             traceback.print_exc()
 
         finally:
-            self.is_processing = False
+            self._processing_lock.release()
 
+    def _run_async(self, coroutine: asyncio.Future) -> Any:
+        """Execute an async coroutine on the background loop and wait for the result."""
+        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        return future.result(timeout=self._async_timeout)
+
+    def _array_to_pcm_bytes(self, audio_array: np.ndarray) -> bytes:
+        """Convert incoming audio array to 16-bit PCM bytes."""
+        array = np.asarray(audio_array)
+
+        if array.size == 0:
+            raise ValueError("audio array is empty")
+
+        if array.ndim > 1:
+            array = array.mean(axis=1)
+
+        if np.issubdtype(array.dtype, np.floating):
+            array = np.clip(array, -1.0, 1.0)
+            array = (array * np.iinfo(np.int16).max).astype(np.int16)
+        else:
+            array = array.astype(np.int16, copy=False)
+
+        return array.tobytes()
+
+    def _wav_bytes_to_float_array(self, audio_bytes: bytes) -> Tuple[int, np.ndarray]:
+        """Decode WAV bytes into mono float32 samples for FastRTC."""
+        with wave.open(io.BytesIO(audio_bytes), 'rb') as wav_file:
+            sample_rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            frames = wav_file.readframes(wav_file.getnframes())
+
+        dtype_map = {1: np.uint8, 2: np.int16, 4: np.int32}
+        dtype = dtype_map.get(sample_width)
+        if dtype is None:
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+
+        data = np.frombuffer(frames, dtype=dtype)
+
+        if sample_width == 1:
+            data = (data.astype(np.float32) - 128.0) / 128.0
+        elif sample_width == 2:
+            data = data.astype(np.float32) / float(np.iinfo(np.int16).max)
+        elif sample_width == 4:
+            data = data.astype(np.float32) / float(np.iinfo(np.int32).max)
+        else:
+            raise ValueError(f"Unsupported sample width: {sample_width}")
+
+        if channels > 1:
+            data = data.reshape(-1, channels).mean(axis=1)
+
+        return sample_rate, data.astype(np.float32)
 
 
 # ============================================================================

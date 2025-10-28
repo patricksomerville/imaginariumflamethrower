@@ -16,9 +16,10 @@ Author: Imaginarium Flamethrower Team
 """
 
 import asyncio
-import time
-from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from typing import Any, Optional, Tuple
+
+import numpy as np
 
 try:
     from fastrtc import Stream, AudioDeviceConfig, ReplyOnPause
@@ -376,7 +377,7 @@ class VoiceChatHandler:
         self.tts = TextToSpeech()
 
         # State
-        self.is_processing = False
+        self._process_lock = asyncio.Lock()
         self.stream: Optional[Stream] = None
 
         print("[Voice Chat] Initialized successfully")
@@ -391,18 +392,18 @@ class VoiceChatHandler:
         Args:
             audio_data: Audio data from FastRTC (user's speech)
         """
-        if self.is_processing:
+        if self._process_lock.locked():
             print("[Voice Chat] Already processing, skipping...")
             return
 
-        try:
-            self.is_processing = True
+        async with self._process_lock:
             print("\n[Voice Chat] User finished speaking, processing...")
 
-            # Step 1: Convert audio data to bytes
-            # The actual format depends on FastRTC's AudioData type
-            # This is a placeholder - adjust based on FastRTC API
-            audio_bytes = self._extract_audio_bytes(audio_data)
+            try:
+                audio_bytes = self._extract_audio_bytes(audio_data)
+            except ValueError as exc:
+                print(f"[Voice Chat] Could not extract audio: {exc}")
+                return
 
             if not audio_bytes or len(audio_bytes) < 1000:
                 print("[Voice Chat] Audio too short, skipping...")
@@ -410,7 +411,11 @@ class VoiceChatHandler:
 
             # Step 2: Speech-to-Text
             print("[Voice Chat] Step 1/3: Transcribing speech...")
-            transcription = await self.stt.transcribe(audio_bytes)
+            try:
+                transcription = await self.stt.transcribe(audio_bytes)
+            except Exception as exc:  # pragma: no cover - depends on provider
+                print(f"[Voice Chat] STT failed: {exc}")
+                return
 
             if not transcription.strip():
                 print("[Voice Chat] No speech detected")
@@ -418,53 +423,87 @@ class VoiceChatHandler:
 
             # Step 3: AI Agent processing
             print("[Voice Chat] Step 2/3: Processing with AI agent...")
-            response_text = await self.agent.process(transcription)
+            try:
+                response_text = await self.agent.process(transcription)
+            except Exception as exc:  # pragma: no cover - depends on provider
+                print(f"[Voice Chat] Agent error: {exc}")
+                return
 
             # Step 4: Text-to-Speech
             print("[Voice Chat] Step 3/3: Generating speech response...")
-            response_audio = await self.tts.synthesize(response_text)
+            try:
+                response_audio = await self.tts.synthesize(response_text)
+            except Exception as exc:  # pragma: no cover - depends on provider
+                print(f"[Voice Chat] TTS failed: {exc}")
+                return
+
+            if not response_audio:
+                print("[Voice Chat] No audio generated from TTS")
+                return
 
             # Step 5: Send audio back through FastRTC stream
             if self.stream:
-                await self._send_audio(response_audio)
-                print("[Voice Chat] Response sent to user")
-
-        except Exception as e:
-            print(f"[Voice Chat] Error processing audio: {e}")
-            import traceback
-            traceback.print_exc()
-
-        finally:
-            self.is_processing = False
+                try:
+                    await self._send_audio(response_audio)
+                    print("[Voice Chat] Response sent to user")
+                except Exception as exc:  # pragma: no cover - depends on FastRTC
+                    print(f"[Voice Chat] Failed to send audio: {exc}")
 
     def _extract_audio_bytes(self, audio_data: Any) -> bytes:
-        """
-        Extract raw audio bytes from FastRTC AudioData object.
+        """Extract raw audio bytes from supported FastRTC payloads."""
+        if audio_data is None:
+            raise ValueError("No audio data provided")
 
-        Args:
-            audio_data: FastRTC AudioData object
-
-        Returns:
-            Raw audio bytes
-
-        NOTE: This is a placeholder. The actual implementation depends on
-        FastRTC's AudioData structure. Check FastRTC documentation for the
-        correct way to extract audio bytes.
-
-        Possible implementations:
-        - audio_data.tobytes()
-        - audio_data.data
-        - bytes(audio_data)
-        """
-        # Placeholder - adjust based on FastRTC API
         if isinstance(audio_data, bytes):
             return audio_data
-        elif hasattr(audio_data, 'tobytes'):
-            return audio_data.tobytes()
-        elif hasattr(audio_data, 'data'):
-            return audio_data.data
-        else:
+
+        if isinstance(audio_data, (bytearray, memoryview)):
             return bytes(audio_data)
+
+        if isinstance(audio_data, tuple) and len(audio_data) == 2:
+            # Common pattern: (sample_rate, samples)
+            _, payload = audio_data
+            return self._audio_array_to_bytes(payload)
+
+        if AudioData is not None and isinstance(audio_data, AudioData):
+            if hasattr(audio_data, "pcm"):
+                pcm = audio_data.pcm
+                return bytes(pcm) if not isinstance(pcm, bytes) else pcm
+
+            if hasattr(audio_data, "data"):
+                data = audio_data.data
+                if isinstance(data, (bytes, bytearray, memoryview)):
+                    return bytes(data)
+                return self._audio_array_to_bytes(data)
+
+            if hasattr(audio_data, "tobytes"):
+                return audio_data.tobytes()
+
+        if hasattr(audio_data, "tobytes"):
+            return audio_data.tobytes()
+
+        if isinstance(audio_data, (list, tuple)):
+            return self._audio_array_to_bytes(audio_data)
+
+        raise ValueError(f"Unsupported audio data type: {type(audio_data)!r}")
+
+    def _audio_array_to_bytes(self, payload: Any) -> bytes:
+        """Convert array-like audio payloads to 16-bit PCM bytes."""
+        array = np.asarray(payload)
+
+        if array.size == 0:
+            raise ValueError("Audio input contained no samples")
+
+        if array.ndim > 1:
+            array = np.mean(array, axis=1)
+
+        if np.issubdtype(array.dtype, np.floating):
+            array = np.clip(array, -1.0, 1.0)
+            array = (array * np.iinfo(np.int16).max).astype(np.int16)
+        else:
+            array = array.astype(np.int16, copy=False)
+
+        return array.tobytes()
 
     async def _send_audio(self, audio_bytes: bytes) -> None:
         """

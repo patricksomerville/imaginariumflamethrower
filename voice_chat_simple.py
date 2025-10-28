@@ -10,10 +10,13 @@ Then open: http://localhost:7860
 """
 
 import os
-import asyncio
 import tempfile
-import io
-from pathlib import Path
+import wave
+import atexit
+import time
+from typing import Optional, Tuple, Union
+
+import numpy as np
 
 # Try to load .env file if it exists
 try:
@@ -58,6 +61,75 @@ client = OpenAI()
 print("\n" + "="*60)
 print("Simple Voice Chat - Initializing...")
 print("="*60)
+
+_TEMP_TTS_FILES: list[tuple[float, str]] = []
+
+
+def _cleanup_tts_files(max_age_seconds: int = 600) -> None:
+    """Remove generated audio files older than the max age."""
+    now = time.time()
+    keep: list[tuple[float, str]] = []
+    for created_at, path in _TEMP_TTS_FILES:
+        if max_age_seconds <= 0 or now - created_at > max_age_seconds:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"[TTS] Failed to clean up temp file {path}: {exc}")
+        else:
+            keep.append((created_at, path))
+    _TEMP_TTS_FILES[:] = keep
+
+
+def _register_tts_file(path: str) -> str:
+    _TEMP_TTS_FILES.append((time.time(), path))
+    return path
+
+
+@atexit.register
+def _cleanup_all_temp_audio() -> None:
+    _cleanup_tts_files(max_age_seconds=0)
+
+
+def _prepare_audio_file(audio_input: Union[str, Tuple[int, np.ndarray]]) -> tuple[str, Optional[str]]:
+    """Ensure audio input is available as a file on disk."""
+    if isinstance(audio_input, str):
+        return audio_input, None
+
+    if (not isinstance(audio_input, tuple)) or len(audio_input) != 2:
+        raise ValueError("Unsupported audio input format")
+
+    sample_rate, audio_array = audio_input
+
+    if sample_rate is None or audio_array is None:
+        raise ValueError("Audio input is missing data")
+
+    array = np.asarray(audio_array)
+
+    if array.size == 0:
+        raise ValueError("Audio input contained no samples")
+
+    if array.ndim > 1:
+        array = np.mean(array, axis=1)
+
+    if np.issubdtype(array.dtype, np.floating):
+        array = np.clip(array, -1.0, 1.0)
+        array = (array * 32767).astype(np.int16)
+    else:
+        array = array.astype(np.int16, copy=False)
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    try:
+        with wave.open(temp_file, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(int(sample_rate))
+            wav_file.writeframes(array.tobytes())
+    finally:
+        temp_file.close()
+
+    return temp_file.name, temp_file.name
 
 # ============================================================================
 # Speech-to-Text using OpenAI Whisper
@@ -178,11 +250,14 @@ def synthesize_speech(text: str) -> str:
 
         # Save to temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        temp_file.write(response.content)
-        temp_file.close()
+        try:
+            temp_file.write(response.content)
+        finally:
+            temp_file.close()
 
-        print(f"[TTS] Generated audio: {temp_file.name}")
-        return temp_file.name
+        path = _register_tts_file(temp_file.name)
+        print(f"[TTS] Generated audio: {path}")
+        return path
 
     except Exception as e:
         print(f"[TTS] Error: {e}")
@@ -206,13 +281,10 @@ def process_audio(audio_input):
     if audio_input is None:
         return "No audio provided", "Please record or upload audio first.", None
 
-    # Handle different audio input formats from Gradio
-    if isinstance(audio_input, tuple):
-        # Format: (sample_rate, audio_data)
-        audio_path = audio_input
-    else:
-        # Already a file path
-        audio_path = audio_input
+    try:
+        audio_path, temp_path = _prepare_audio_file(audio_input)
+    except ValueError as exc:
+        return "Error", f"Invalid audio input: {exc}", None
 
     print("\n" + "-"*60)
     print("Processing new audio input...")
@@ -229,6 +301,7 @@ def process_audio(audio_input):
         ai_response = process_with_ai(transcription)
 
         # Step 3: Convert response to speech
+        _cleanup_tts_files()
         response_audio = synthesize_speech(ai_response)
 
         print("-"*60)
@@ -243,6 +316,14 @@ def process_audio(audio_input):
         import traceback
         traceback.print_exc()
         return "Error", error_msg, None
+    finally:
+        if 'temp_path' in locals() and temp_path:
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"[STT] Failed to remove temp audio file {temp_path}: {exc}")
 
 
 def reset_conversation():
